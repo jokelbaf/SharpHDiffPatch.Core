@@ -31,7 +31,6 @@ namespace SharpHDiffPatch.Core.Binary.Streams
 
         private long _position;
         private int _index;
-        private readonly bool _isEmpty;
 
         /// <summary>
         /// Constructs a new <see cref="CombinedStream"/> on top of the specified array
@@ -45,6 +44,20 @@ namespace SharpHDiffPatch.Core.Binary.Streams
         {
             if (underlyingStreams == null)
                 throw new ArgumentNullException(nameof(underlyingStreams), "[CombinedStream::ctor()] underlyingStreams");
+
+            if (underlyingStreams.Length == 0)
+            {
+                // Handle empty stream array - create an empty stream
+                _underlyingStreams = new FileStream[0];
+                _underlyingStartingPositions = new long[0];
+                _position = 0;
+                _index = 0;
+                Length = 0;
+#if SHOWMOREDEBUGINFO
+                HDiffPatch.Event.PushLog($"[CombinedStream::ctor()] Created empty CombinedStream", Verbosity.Debug);
+#endif
+                return;
+            }
 
             foreach (FileStream stream in underlyingStreams)
             {
@@ -61,13 +74,6 @@ namespace SharpHDiffPatch.Core.Binary.Streams
 
             _position = 0;
             _index = 0;
-
-            if (underlyingStreams.Length == 0)
-            {
-                Length = 0;
-                _isEmpty = true;
-                return;
-            }
 
             _underlyingStartingPositions[0] = 0;
             for (int index = 1; index < _underlyingStartingPositions.Length; index++)
@@ -93,6 +99,20 @@ namespace SharpHDiffPatch.Core.Binary.Streams
             if (underlyingStreams == null)
                 throw new ArgumentNullException(nameof(underlyingStreams), "[CombinedStream::ctor()] underlyingStreams");
 
+            if (underlyingStreams.Length == 0)
+            {
+                // Handle empty stream array - create an empty stream
+                _underlyingStreams = new FileStream[0];
+                _underlyingStartingPositions = new long[0];
+                _position = 0;
+                _index = 0;
+                Length = 0;
+#if SHOWMOREDEBUGINFO
+                HDiffPatch.Event.PushLog($"[CombinedStream::ctor()] Created empty CombinedStream from NewFileCombinedStream", Verbosity.Debug);
+#endif
+                return;
+            }
+
             _underlyingStreams = new FileStream[underlyingStreams.Length];
             _underlyingStartingPositions = new long[underlyingStreams.Length];
 
@@ -106,19 +126,15 @@ namespace SharpHDiffPatch.Core.Binary.Streams
                     throw new InvalidOperationException("[CombinedStream::ctor()] CanSeek not true for all streams");
 
                 stream.Stream.SetLength(stream.Size);
+#if SHOWMOREDEBUGINFO
+                HDiffPatch.Event.PushLog($"[CombinedStream::ctor()] Initializing file with length {stream.size} bytes: {stream.stream.Name}", Verbosity.Debug);
+#endif
             }
 
             Array.Copy(underlyingStreams.Select(x => x.Stream).ToArray(), _underlyingStreams, underlyingStreams.Length);
 
             _position = 0;
             _index = 0;
-
-            if (underlyingStreams.Length == 0)
-            {
-                Length = 0;
-                _isEmpty = true;
-                return;
-            }
 
             _underlyingStartingPositions[0] = 0;
             for (int index = 1; index < _underlyingStartingPositions.Length; index++)
@@ -170,7 +186,6 @@ namespace SharpHDiffPatch.Core.Binary.Streams
         /// <exception cref="T:System.IO.IOException">An I/O error occurs. </exception>
         public override void Flush()
         {
-            if (_isEmpty) return;
             foreach (FileStream stream in _underlyingStreams)
                 stream.Flush();
         }
@@ -214,17 +229,12 @@ namespace SharpHDiffPatch.Core.Binary.Streams
                     throw new ArgumentOutOfRangeException(nameof(value));
 
                 _position = value;
-                if (_isEmpty)
-                {
-                    _index = 0;
-                    return;
-                }
                 if (value == Length)
                     _index = _underlyingStreams.Length - 1;
                 else
                 {
                     while (_index > 0 && _position < _underlyingStartingPositions[_index])
-                        _index++;
+                        _index--;
 
                     while (_index < _underlyingStreams.Length - 1 && _position >= _underlyingStartingPositions[_index] + _underlyingStreams[_index].Length)
                         _index++;
@@ -235,6 +245,9 @@ namespace SharpHDiffPatch.Core.Binary.Streams
 #if !(NETSTANDARD2_0 || NET461_OR_GREATER)
         public override int Read(Span<byte> buffer)
         {
+            if (_underlyingStreams.Length == 0)
+                return 0;
+
             int result = 0;
             int count = buffer.Length;
             int offset = 0;
@@ -281,7 +294,9 @@ namespace SharpHDiffPatch.Core.Binary.Streams
         /// <exception cref="T:System.ArgumentOutOfRangeException">offset or count is negative. </exception>
         public override int Read(byte[] buffer, int offset, int count)
         {
-            if (_isEmpty) return 0;
+            if (_underlyingStreams.Length == 0)
+                return 0;
+
             int result = 0;
             while (count > 0)
             {
@@ -296,6 +311,9 @@ namespace SharpHDiffPatch.Core.Binary.Streams
                 if (_index < _underlyingStreams.Length - 1)
                 {
                     _index++;
+#if SHOWMOREDEBUGING
+                    HDiffPatch.Event.PushLog($"[CombinedStream::Read] Moving the stream to Index: {_Index}", Verbosity.Debug);
+#endif
                 }
                 else
                     break;
@@ -317,12 +335,6 @@ namespace SharpHDiffPatch.Core.Binary.Streams
         /// <exception cref="T:System.ObjectDisposedException">Methods were called after the stream was closed. </exception>
         public override long Seek(long offset, SeekOrigin origin)
         {
-            if (_isEmpty)
-            {
-                _position = 0;
-                _index = 0;
-                return 0;
-            }
             switch (origin)
             {
                 case SeekOrigin.Begin:
@@ -357,6 +369,13 @@ namespace SharpHDiffPatch.Core.Binary.Streams
 #if !(NETSTANDARD2_0 || NET461_OR_GREATER)
         public override void Write(ReadOnlySpan<byte> buffer)
         {
+            if (_underlyingStreams.Length == 0)
+            {
+                if (buffer.Length > 0)
+                    throw new InvalidOperationException("[CombinedStream::Write] Cannot write to empty stream");
+                return;
+            }
+
             int count = buffer.Length;
             int offset = 0;
             while (count > 0)
@@ -399,16 +418,48 @@ namespace SharpHDiffPatch.Core.Binary.Streams
         /// </exception>
         public override void Write(byte[] buffer, int offset, int count)
         {
-            if (_isEmpty) return;
+            if (_underlyingStreams.Length == 0)
+            {
+                if (count > 0)
+                    throw new InvalidOperationException("[CombinedStream::Write] Cannot write to empty stream");
+                return;
+            }
+
             while (count > 0)
             {
-                _underlyingStreams[_index].Position = _position - _underlyingStartingPositions[_index];
-                int bytesWrite = count;
-                int remainedMaxLength = (int)(_underlyingStreams[_index].Length - _underlyingStreams[_index].Position);
-                if (remainedMaxLength < count)
+                if (_index >= _underlyingStreams.Length)
                 {
-                    bytesWrite = remainedMaxLength;
+                    throw new InvalidOperationException($"[CombinedStream::Write] Stream index {_index} is out of bounds. Available streams: {_underlyingStreams.Length}");
                 }
+
+                long localPosition = _position - _underlyingStartingPositions[_index];
+                _underlyingStreams[_index].Position = localPosition;
+                
+                long remainedMaxLength = _underlyingStreams[_index].Length - localPosition;
+                
+                if (remainedMaxLength <= 0)
+                {
+                    if (_index < _underlyingStreams.Length - 1)
+                    {
+                        _index++;
+#if SHOWMOREDEBUGINFO
+                        HDiffPatch.Event.PushLog($"[CombinedStream::Write] Moving to next stream. Index: {_index}", Verbosity.Debug);
+#endif
+                        continue;
+                    }
+                    else
+                    {
+                        throw new EndOfStreamException($"[CombinedStream::Write] No more space available in combined stream. Position: {_position}, Total Length: {Length}");
+                    }
+                }
+
+                int bytesWrite = (int)Math.Min(count, remainedMaxLength);
+                
+                if (offset + bytesWrite > buffer.Length)
+                {
+                    throw new ArgumentException($"[CombinedStream::Write] Buffer overflow: offset={offset}, bytesWrite={bytesWrite}, buffer.Length={buffer.Length}");
+                }
+
                 _underlyingStreams[_index].Write(buffer, offset, bytesWrite);
                 offset += bytesWrite;
                 count -= bytesWrite;
@@ -418,6 +469,9 @@ namespace SharpHDiffPatch.Core.Binary.Streams
                 if (_index < _underlyingStreams.Length - 1)
                 {
                     _index++;
+#if SHOWMOREDEBUGINFO
+                    HDiffPatch.Event.PushLog($"[CombinedStream::Write] Moving the stream to Index: {_index}", Verbosity.Debug);
+#endif
                 }
                 else
                     break;
